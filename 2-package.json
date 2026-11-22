@@ -1,0 +1,12 @@
+{
+  "name": "aman-call-server",
+  "version": "1.0.0",
+  "description": "Signaling and accounts server for Aman encrypted calling app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
