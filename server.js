@@ -280,6 +280,19 @@ wss.on('connection', ws => {
       }
       return send(ws, { type: 'statuses', items: out });
     }
+    if (t === 'mode_off') {
+      const to = String(msg.to || '');
+      if (!isFriend(me, to)) return;
+      if (isBlocked(to, me) || isBlocked(me, to)) return send(ws,{type:'chat_failed',id:msg.id,reason:'blocked'});
+      const frame = {type:'chat',from:me,id:String(msg.id || '').slice(0,40),iv:'MODE_OFF',
+        ct:Buffer.from(JSON.stringify({k:'enc',on:false})).toString('base64')};
+      db.controls[to] = db.controls[to] || [];
+      if (db.controls[to].length >= 1000 && !db.controls[to].some(f => f.id === frame.id && f.from === me))
+        return send(ws,{type:'chat_failed',id:frame.id,reason:'queue_full'});
+      if (!db.controls[to].some(f => f.id === frame.id && f.from === me)) db.controls[to].push(frame);
+      if (!persistNow()) return send(ws,{type:'chat_failed',id:frame.id,reason:'storage'});
+      send(ws,{type:'control_stored',id:frame.id}); sendTo(to,frame); return;
+    }
     if (t === 'control_ack') {
       db.controls[me] = (db.controls[me] || []).filter(f => !(f.id === msg.id && f.from === msg.from));
       save(); return;
@@ -289,6 +302,7 @@ wss.on('connection', ws => {
       if (!isFriend(me, to)) return; // chat is strictly between friends
       if (isBlocked(to, me)) return send(ws, { type: 'chat_failed', id: msg.id, reason: 'blocked' });
       if (isBlocked(me, to)) return send(ws, { type: 'chat_failed', id: msg.id, reason: 'you_blocked' });
+      if (msg.iv === 'MODE_OFF') return send(ws,{type:'chat_failed',id:msg.id,reason:'reserved_control'});
       if (msg.control === true) {
         if (msg.iv === 'PLAIN' || String(msg.ct || '').length > 4000) return;
         const frame = { type: 'chat', from: me, id: String(msg.id || '').slice(0,40),
@@ -381,7 +395,7 @@ async function handleHttp(req, res) {
   }
   if (url.pathname === '/version') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    return res.end('7');
+    return res.end('8');
   }
   if (url.pathname === '/admin') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
