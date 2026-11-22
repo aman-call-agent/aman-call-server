@@ -29,13 +29,17 @@ db.users = db.users || {}; db.friends = db.friends || {}; db.requests = db.reque
 
 db.controls = db.controls || {};
 let saveTimer = null;
+function persistNow() {
+  clearTimeout(saveTimer);
+  try {
+    fs.writeFileSync(DB_FILE + '.tmp', JSON.stringify(db, null, 2));
+    fs.renameSync(DB_FILE + '.tmp', DB_FILE);
+    return true;
+  } catch (e) { console.error('save failed:', e.message); return false; }
+}
 function save() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    fs.writeFile(DB_FILE, JSON.stringify(db, null, 2), err => {
-      if (err) console.error('save failed:', err.message);
-    });
-  }, 200);
+  saveTimer = setTimeout(persistNow, 200);
 }
 
 function hashPassword(password, salt) {
@@ -290,9 +294,10 @@ wss.on('connection', ws => {
         const frame = { type: 'chat', from: me, id: String(msg.id || '').slice(0,40),
           iv: String(msg.iv || ''), ct: String(msg.ct || '') };
         db.controls[to] = db.controls[to] || [];
-        if (db.controls[to].length >= 1000) return send(ws, {type: 'chat_failed', id: msg.id, reason: 'queue_full'});
-        db.controls[to].push(frame);
-        save();
+        if (db.controls[to].length >= 1000 && !db.controls[to].some(f => f.id === frame.id && f.from === me)) return send(ws, {type: 'chat_failed', id: msg.id, reason: 'queue_full'});
+        if (!db.controls[to].some(f => f.id === frame.id && f.from === me)) db.controls[to].push(frame);
+        if (!persistNow()) return send(ws, {type:'chat_failed',id:frame.id,reason:'storage'});
+        send(ws, {type:'control_stored', id:frame.id});
         sendTo(to, frame);
         return;
       }
@@ -376,7 +381,7 @@ async function handleHttp(req, res) {
   }
   if (url.pathname === '/version') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    return res.end('6');
+    return res.end('7');
   }
   if (url.pathname === '/admin') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
