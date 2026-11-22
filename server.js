@@ -27,6 +27,7 @@ try {
 } catch (e) { console.error('Could not read data.json, starting empty:', e.message); }
 db.users = db.users || {}; db.friends = db.friends || {}; db.requests = db.requests || {}; db.blocks = db.blocks || {};
 
+db.controls = db.controls || {};
 let saveTimer = null;
 function save() {
   clearTimeout(saveTimer);
@@ -208,7 +209,7 @@ wss.on('connection', ws => {
       if (isBlocked(to, me)) return send(ws, { type: 'call_error', message: 'المستخدم ده مش متاح للمكالمات' });
       if (isBlocked(me, to)) return send(ws, { type: 'call_error', message: 'انت حاظر المستخدم ده - افتح الحظر الأول' });
       if (!online.has(to)) return send(ws, { type: 'call_error', message: 'الطرف التاني مش متصل دلوقتي' });
-      sendTo(to, { type: 'incoming_call', from: me });
+      sendTo(to, { type: 'incoming_call', from: me, video: !!msg.video });
       return send(ws, { type: 'call_ringing', to });
     }
 
@@ -227,17 +228,26 @@ wss.on('connection', ws => {
       return;
     }
 
-    // ---- encrypted chat: relay only, never stored ----
+    // Chat payloads: ciphertext by default, PLAIN only with explicit per-chat opt-out.
+    // Only encrypted control frames are persisted for offline delivery.
     if (t === 'pubkey') {
-      // client announces its ECDH public key; kept in memory while connected
+      // Public keys (not private keys) persist for encrypted offline controls.
       const key = String(msg.key || '');
-      if (key.length > 20 && key.length < 500) pubkeys.set(me, key);
+      if (key.length > 20 && key.length < 500) {
+        pubkeys.set(me, key);
+        db.users[me].pubkey = key;
+        save();
+        for (const frame of (db.controls[me] || [])) {
+          if (isFriend(me, frame.from) && !isBlocked(me, frame.from) && !isBlocked(frame.from, me)) send(ws, frame);
+        }
+      }
       return;
     }
 
     if (t === 'get_key') {
       const u = String(msg.username || '');
-      const key = pubkeys.get(u);
+      if (!isFriend(me, u)) return;
+      const key = pubkeys.get(u) || (db.users[u] || {}).pubkey;
       if (!key) return send(ws, { type: 'chat_key_error', username: u });
       return send(ws, { type: 'chat_key', username: u, key });
     }
@@ -266,15 +276,30 @@ wss.on('connection', ws => {
       }
       return send(ws, { type: 'statuses', items: out });
     }
+    if (t === 'control_ack') {
+      db.controls[me] = (db.controls[me] || []).filter(f => !(f.id === msg.id && f.from === msg.from));
+      save(); return;
+    }
     if (t === 'chat') {
       const to = String(msg.to || '');
       if (!isFriend(me, to)) return; // chat is strictly between friends
       if (isBlocked(to, me)) return send(ws, { type: 'chat_failed', id: msg.id, reason: 'blocked' });
       if (isBlocked(me, to)) return send(ws, { type: 'chat_failed', id: msg.id, reason: 'you_blocked' });
+      if (msg.control === true) {
+        if (msg.iv === 'PLAIN' || String(msg.ct || '').length > 4000) return;
+        const frame = { type: 'chat', from: me, id: String(msg.id || '').slice(0,40),
+          iv: String(msg.iv || ''), ct: String(msg.ct || '') };
+        db.controls[to] = db.controls[to] || [];
+        if (db.controls[to].length >= 1000) return send(ws, {type: 'chat_failed', id: msg.id, reason: 'queue_full'});
+        db.controls[to].push(frame);
+        save();
+        sendTo(to, frame);
+        return;
+      }
       if (!online.has(to)) {
         return send(ws, { type: 'chat_failed', id: msg.id, reason: 'offline' });
       }
-      // relay ciphertext as-is; the server cannot read it and does not store it
+      // Relay as-is. PLAIN mode is readable here; normal messages are never stored.
       sendTo(to, {
         type: 'chat', from: me,
         id: String(msg.id || '').slice(0, 40),
@@ -351,7 +376,7 @@ async function handleHttp(req, res) {
   }
   if (url.pathname === '/version') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    return res.end('5');
+    return res.end('6');
   }
   if (url.pathname === '/admin') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
